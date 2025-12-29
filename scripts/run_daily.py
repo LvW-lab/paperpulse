@@ -1,6 +1,8 @@
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
+import smtplib
+from email.message import EmailMessage
 
 DB_PATH = "paperpulse.db"
 
@@ -36,10 +38,26 @@ def fetch_new_papers_stub(since_utc: datetime) -> list[dict]:
     return []
 
 def send_email_stub(subject: str, html_body: str) -> None:
-    # TODO: implement SMTP send using secrets in env vars
-    # SMTP_HOST/PORT/USER/PASS/MAIL_FROM/MAIL_TO
-    print(subject)
-    print(html_body)
+    host = os.environ["SMTP_HOST"]
+    port = int(os.environ.get("SMTP_PORT", "587"))
+    user = os.environ["SMTP_USER"]
+    password = os.environ["SMTP_PASS"]
+    mail_from = os.environ["MAIL_FROM"]
+    mail_to = os.environ["MAIL_TO"]
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = mail_from
+    msg["To"] = mail_to
+    msg.set_content("This email requires HTML support.")
+    msg.add_alternative(html_body, subtype="html")
+
+    with smtplib.SMTP(host, port) as smtp:
+        smtp.ehlo()
+        smtp.starttls()
+        smtp.ehlo()
+        smtp.login(user, password)
+        smtp.send_message(msg)
 
 def main() -> None:
     since = datetime.now(timezone.utc) - timedelta(days=1)
@@ -53,11 +71,11 @@ def main() -> None:
                 store(conn, p)
                 new_items.append(p)
 
-    subject = f"GBM invasion & integrins — new papers ({datetime.now().date().isoformat()})"
-    html = "<h2>New papers</h2>" + "".join(
-        f"<p><a href='{p.get('url','')}'>{p.get('title','(no title)')}</a></p>" for p in new_items
-    )
+    subject = f"[TEST] PaperPulse SMTP works — {datetime.now(timezone.utc).isoformat()}"
+    html = "<h2>✅ PaperPulse test</h2><p>Als je dit ontvangt, werken GitHub Secrets + SMTP + Actions.</p>"
     send_email_stub(subject, html)
+    return
+
 
 if __name__ == "__main__":
     main()
