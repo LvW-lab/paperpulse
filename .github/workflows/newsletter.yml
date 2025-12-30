@@ -17,31 +17,39 @@ on:
         description: "Override time window (days). Leave empty to use default."
         required: false
         type: string
+
   schedule:
-    - cron: "30 6 * * 1-5"   # daily weekdays
-    - cron: "0 17 * * 0"     # weekly Sunday
-    - cron: "0 17 1 * *"     # monthly 1st day of month
-    - cron: "0 18 1 1 *"     # yearly Jan 1st
+    - cron: "30 6 * * 1-5"   # daily weekdays (UTC)
+    - cron: "0 17 * * 0"     # weekly Sunday (UTC)
+    - cron: "0 17 1 * *"     # monthly 1st day of month (UTC)
+    - cron: "0 18 1 1 *"     # yearly Jan 1st (UTC)
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - run: |
+      - name: Install dependencies
+        run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - uses: actions/download-artifact@v4
+      # ✅ Persist DB across runs using cache (artifacts don't work for this use case)
+      - name: Restore DB cache
+        uses: actions/cache/restore@v4
         with:
-          name: paperpulse-db
-          path: .
-        continue-on-error: true
+          path: paperpulse.db
+          key: paperpulse-db-${{ github.run_id }}
+          restore-keys: |
+            paperpulse-db-
 
       - name: Run pipeline
         env:
@@ -78,7 +86,15 @@ jobs:
         run: |
           test -f paperpulse.db || touch paperpulse.db
 
-      - uses: actions/upload-artifact@v4
+      - name: Save DB cache
+        uses: actions/cache/save@v4
+        with:
+          path: paperpulse.db
+          key: paperpulse-db-${{ github.run_id }}
+
+      # Optional: still upload artifact so you can download the DB from a run page
+      - name: Upload DB artifact (optional)
+        uses: actions/upload-artifact@v4
         with:
           name: paperpulse-db
           path: paperpulse.db
