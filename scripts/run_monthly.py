@@ -16,11 +16,24 @@ def init_db(conn: sqlite3.Connection) -> None:
       title TEXT,
       journal TEXT,
       published_date TEXT,
+      published_date_iso TEXT,
       url TEXT,
       created_at TEXT
     )
     """)
     conn.commit()
+
+def db_stats(conn: sqlite3.Connection) -> None:
+    # ensure schema exists first
+    cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='papers'")
+    has_table = cur.fetchone() is not None
+    print(f"[DB] papers table exists: {has_table}")
+
+    if has_table:
+        total = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+        newest = conn.execute("SELECT MAX(created_at) FROM papers").fetchone()[0]
+        print(f"[DB] total rows in papers: {total}")
+        print(f"[DB] newest created_at: {newest}")
 
 
 def send_email(subject: str, html_body: str) -> None:
@@ -59,22 +72,28 @@ def get_window_days(default_days: int, max_days: int = 1825) -> int:
     return default_days
 
 
-def fetch_rows(conn: sqlite3.Connection, since_iso: str) -> List[Tuple[str, str, str, str, str]]:
+def fetch_rows(
+    conn: sqlite3.Connection,
+    since_date_iso: str
+) -> List[Tuple[str, str, str, str, str, str]]:
+    """
+    Fetch papers published on or after since_date_iso (YYYY-MM-DD).
+    """
     return conn.execute(
         """
-        SELECT id, title, journal, published_date, url
+        SELECT id, source, title, journal, published_date, url
         FROM papers
-        WHERE created_at >= ?
-        ORDER BY published_date DESC
+        WHERE published_date_iso >= ?
+        ORDER BY published_date_iso DESC
         """,
-        (since_iso,),
+        (since_date_iso,),
     ).fetchall()
 
 
 def build_html(rows: List[Tuple[str, str, str, str, str]], window_days: int) -> str:
-    header = f"<h2>Monthly overview</h2><p>Items added in the last {window_days} days: <b>{len(rows)}</b></p>"
+    header = f"<h2>Monthly overview</h2><p>Papers published in the last {window_days} days: <b>{len(rows)}</b></p>"
     if not rows:
-        return header + "<p>No papers were added to the database in this window.</p>"
+        return header + "<p>No papers were published in this window.</p>"
 
     items = []
     for (_pid, title, journal, pubdate, url) in rows:
@@ -95,10 +114,12 @@ def build_html(rows: List[Tuple[str, str, str, str, str]], window_days: int) -> 
 def main() -> None:
     window_days = get_window_days(default_days=30)
     since = datetime.now(timezone.utc) - timedelta(days=window_days)
+    since_date_iso = since.date().isoformat()
 
     with sqlite3.connect(DB_PATH) as conn:
-        init_db(conn) 
-        rows = fetch_rows(conn, since.isoformat())
+        init_db(conn)
+        db_stats(conn)
+        rows = fetch_rows(conn, since_date_iso)
 
     today_utc = datetime.now(timezone.utc).date().isoformat()
     subject = f"Monthly overview — GBM invasion & integrins ({window_days}d window, as of {today_utc})"

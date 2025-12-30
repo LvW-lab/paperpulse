@@ -40,11 +40,25 @@ def init_db(conn: sqlite3.Connection) -> None:
       title TEXT,
       journal TEXT,
       published_date TEXT,
+      published_date_iso TEXT,
       url TEXT,
       created_at TEXT
     )
     """)
     conn.commit()
+
+def db_stats(conn: sqlite3.Connection) -> None:
+    # ensure schema exists first
+    cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='papers'")
+    has_table = cur.fetchone() is not None
+    print(f"[DB] papers table exists: {has_table}")
+
+    if has_table:
+        total = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+        newest = conn.execute("SELECT MAX(created_at) FROM papers").fetchone()[0]
+        print(f"[DB] total rows in papers: {total}")
+        print(f"[DB] newest created_at: {newest}")
+
 
 def already_seen(conn: sqlite3.Connection, paper_id: str) -> bool:
     cur = conn.execute("SELECT 1 FROM papers WHERE id = ? LIMIT 1", (paper_id,))
@@ -52,15 +66,50 @@ def already_seen(conn: sqlite3.Connection, paper_id: str) -> bool:
 
 def store(conn: sqlite3.Connection, p: dict) -> None:
     conn.execute(
-        "INSERT OR IGNORE INTO papers (id, source, title, journal, published_date, url, created_at) VALUES (?,?,?,?,?,?,?)",
-        (p["id"], p["source"], p["title"], p.get("journal"), p.get("published_date"), p.get("url"),
-         datetime.now(timezone.utc).isoformat())
+        """
+        INSERT OR IGNORE INTO papers
+        (id, source, title, journal, published_date, published_date_iso, url, created_at)
+        VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (
+            p["id"],
+            p["source"],
+            p["title"],
+            p.get("journal"),
+            p.get("published_date"),
+            p.get("published_date_iso"),
+            p.get("url"),
+            datetime.now(timezone.utc).isoformat(),
+        ),
     )
     conn.commit()
 
 def _fmt_date_utc(dt: datetime) -> str:
     # NCBI mindate/maxdate accept YYYY/MM/DD
     return dt.astimezone(timezone.utc).strftime("%Y/%m/%d")
+
+from datetime import datetime
+
+def parse_pubmed_date(pubdate: str) -> str | None:
+    """
+    Convert PubMed date strings to ISO YYYY-MM-DD.
+    Handles common formats like:
+      - '2024 Jan 12'
+      - '2024 Jan'
+      - '2024'
+    """
+    if not pubdate:
+        return None
+
+    for fmt in ("%Y %b %d", "%Y %b", "%Y"):
+        try:
+            dt = datetime.strptime(pubdate, fmt)
+            return dt.date().isoformat()
+        except ValueError:
+            pass
+
+    return None
+
 
 def fetch_new_papers_pubmed(since_utc: datetime) -> list[dict]:
     """
@@ -113,13 +162,15 @@ def fetch_new_papers_pubmed(since_utc: datetime) -> list[dict]:
         journal = item.get("fulljournalname") or item.get("source") or ""
         pubdate = item.get("pubdate") or ""  # format varies (e.g., "2025 Dec 29")
         url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-
+        pubdate_iso = parse_pubmed_date(pubdate)
+        
         papers.append({
             "id": pmid,
             "source": "pubmed",
             "title": title if title else "(no title)",
             "journal": journal,
             "published_date": pubdate,
+            "published_date_iso": pubdate_iso,
             "url": url,
         })
 
@@ -148,9 +199,16 @@ def send_email_stub(subject: str, html_body: str) -> None:
         smtp.send_message(msg)
 
 def main() -> None:
-    since = datetime.now(timezone.utc) - timedelta(days=1)
+    days_override = os.environ.get("DAYS_OVERRIDE", "").strip()
+    if days_override.isdigit():
+        window_days = int(days_override)
+    else:
+        window_days = 1
+
+    since = datetime.now(timezone.utc) - timedelta(days=window_days)
     with sqlite3.connect(DB_PATH) as conn:
         init_db(conn)
+        db_stats(conn)
 
         papers = fetch_new_papers_pubmed(since)
         new_items = []
