@@ -159,7 +159,7 @@ def main() -> None:
                 store(conn, p)
                 new_items.append(p)
 
-    subject = f"[TEST] PaperPulse SMTP works — {datetime.now(timezone.utc).isoformat()}"
+    subject = f"PaperPulse Daily Report — {datetime.now(timezone.utc).isoformat()}"
     if not new_items:
         html = "<h2>No new PubMed papers in the last 24h for your query.</h2>"
     else:

@@ -1,33 +1,43 @@
 name: PaperPulse Newsletter
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      report_type:
+        description: "Which report to run?"
+        required: true
+        default: "daily"
+        type: choice
+        options:
+          - daily
+          - weekly
+          - monthly
+          - yearly
+      days:
+        description: "Override time window (days). Leave empty to use default."
+        required: false
+        type: string
   schedule:
-    # Daily (Mon–Fri) at 06:30 UTC ≈ 07:30 Amsterdam (winter)
-    - cron: "30 6 * * 1-5"
-    # Weekly (Sunday) at 17:00 UTC ≈ 18:00 Amsterdam (winter)
-    - cron: "0 17 * * 0"
+    - cron: "30 6 * * 1-5"   # daily weekdays
+    - cron: "0 17 * * 0"     # weekly Sunday
+    - cron: "0 17 1 * *"     # monthly 1st day of month
+    - cron: "0 18 1 1 *"     # yearly Jan 1st
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
+      - run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Download previous DB artifact (if exists)
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: paperpulse-db
           path: .
@@ -42,17 +52,33 @@ jobs:
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
+          REPORT_TYPE: ${{ github.event.inputs.report_type }}
+          DAYS_OVERRIDE: ${{ github.event.inputs.days }}
         run: |
-          if [ "${{ github.event.schedule }}" = "30 6 * * 1-5" ]; then
-            python scripts/run_daily.py
-          elif [ "${{ github.event.schedule }}" = "0 17 * * 0" ]; then
-            python scripts/run_weekly.py
-          else
-            python scripts/run_daily.py
+          set -e
+
+          # Determine report type for scheduled runs
+          if [ -z "$REPORT_TYPE" ]; then
+            if [ "${{ github.event.schedule }}" = "30 6 * * 1-5" ]; then REPORT_TYPE="daily"; fi
+            if [ "${{ github.event.schedule }}" = "0 17 * * 0" ]; then REPORT_TYPE="weekly"; fi
+            if [ "${{ github.event.schedule }}" = "0 17 1 * *" ]; then REPORT_TYPE="monthly"; fi
+            if [ "${{ github.event.schedule }}" = "0 18 1 1 *" ]; then REPORT_TYPE="yearly"; fi
           fi
 
-      - name: Upload DB artifact
-        uses: actions/upload-artifact@v4
+          # Fallback (safety)
+          if [ -z "$REPORT_TYPE" ]; then REPORT_TYPE="daily"; fi
+
+          echo "REPORT_TYPE=$REPORT_TYPE"
+          if [ "$REPORT_TYPE" = "daily" ]; then python scripts/run_daily.py; fi
+          if [ "$REPORT_TYPE" = "weekly" ]; then python scripts/run_weekly.py; fi
+          if [ "$REPORT_TYPE" = "monthly" ]; then python scripts/run_monthly.py; fi
+          if [ "$REPORT_TYPE" = "yearly" ]; then python scripts/run_yearly.py; fi
+
+      - name: Ensure DB exists
+        run: |
+          test -f paperpulse.db || touch paperpulse.db
+
+      - uses: actions/upload-artifact@v4
         with:
           name: paperpulse-db
           path: paperpulse.db
