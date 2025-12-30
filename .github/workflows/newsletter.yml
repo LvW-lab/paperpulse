@@ -41,6 +41,7 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
+          NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
         run: |
           if [ "${{ github.event.schedule }}" = "30 6 * * 1-5" ]; then
             python scripts/run_daily.py
