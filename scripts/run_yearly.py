@@ -4,9 +4,63 @@ import sqlite3
 import smtplib
 from email.message import EmailMessage
 from datetime import datetime, timedelta, timezone
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Set
+import csv
 
 DB_PATH = "paperpulse.db"
+TQCC_PATH = os.path.join("journal-ranking", "tqcc.csv")
+WHITELIST_PATH = os.path.join("journal-ranking", "whitelist.txt")
+
+
+def normalize_journal(name: str) -> str:
+    return " ".join((name or "").strip().lower().split())
+
+
+def load_whitelist(path: str) -> Set[str]:
+    if not os.path.exists(path):
+        print(f"[WHITELIST] File not found: {path} (no whitelist will be applied)")
+        return set()
+
+    wl: Set[str] = set()
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            wl.add(normalize_journal(line))
+
+    print(f"[WHITELIST] Loaded {len(wl)} journals from {path}")
+    return wl
+
+
+def load_tqcc_map(path: str) -> Dict[str, int]:
+    tqcc: Dict[str, int] = {}
+    if not os.path.exists(path):
+        print(f"[TQCC] File not found: {path} (no filtering will be applied)")
+        return tqcc
+
+    last_err: Exception | None = None
+    for enc in ("utf-8", "cp1252", "latin-1"):
+        try:
+            with open(path, "r", encoding=enc) as f:
+                reader = csv.DictReader(f, delimiter=";")
+                for row in reader:
+                    j = normalize_journal(row.get("Journal", ""))
+                    v_raw = (row.get("Value") or "").strip()
+                    if not j or v_raw == "":
+                        continue
+                    try:
+                        tqcc[j] = int(float(v_raw))  # allows "0"
+                    except ValueError:
+                        continue
+            print(f"[TQCC] Loaded {len(tqcc)} journal scores from {path} (encoding={enc})")
+            return tqcc
+        except UnicodeDecodeError as e:
+            last_err = e
+            continue
+
+    raise last_err  # type: ignore[misc]
+
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.execute("""
@@ -23,8 +77,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     """)
     conn.commit()
 
+
 def db_stats(conn: sqlite3.Connection) -> None:
-    # ensure schema exists first
     cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='papers'")
     has_table = cur.fetchone() is not None
     print(f"[DB] papers table exists: {has_table}")
@@ -32,8 +86,12 @@ def db_stats(conn: sqlite3.Connection) -> None:
     if has_table:
         total = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
         newest = conn.execute("SELECT MAX(created_at) FROM papers").fetchone()[0]
+        missing_iso = conn.execute(
+            "SELECT COUNT(*) FROM papers WHERE published_date_iso IS NULL OR published_date_iso = ''"
+        ).fetchone()[0]
         print(f"[DB] total rows in papers: {total}")
         print(f"[DB] newest created_at: {newest}")
+        print(f"[DB] rows missing published_date_iso: {missing_iso}")
 
 
 def send_email(subject: str, html_body: str) -> None:
@@ -60,10 +118,6 @@ def send_email(subject: str, html_body: str) -> None:
 
 
 def get_window_days(default_days: int, max_days: int = 1825) -> int:
-    """
-    Allow overriding the window via DAYS_OVERRIDE env var (workflow_dispatch input).
-    Safety cap defaults to 5 years (1825 days).
-    """
     raw = os.environ.get("DAYS_OVERRIDE", "").strip()
     if raw.isdigit():
         days = int(raw)
@@ -72,13 +126,14 @@ def get_window_days(default_days: int, max_days: int = 1825) -> int:
     return default_days
 
 
-def fetch_rows(
-    conn: sqlite3.Connection,
-    since_date_iso: str
-) -> List[Tuple[str, str, str, str, str, str]]:
-    """
-    Fetch papers published on or after since_date_iso (YYYY-MM-DD).
-    """
+def get_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if raw.isdigit():
+        return int(raw)
+    return default
+
+
+def fetch_rows(conn: sqlite3.Connection, since_date_iso: str) -> List[Tuple[str, str, str, str, str, str]]:
     return conn.execute(
         """
         SELECT id, source, title, journal, published_date, url
@@ -89,19 +144,77 @@ def fetch_rows(
         (since_date_iso,),
     ).fetchall()
 
-def build_html(rows: List[Tuple[str, str, str, str, str]], window_days: int) -> str:
-    header = f"<h2>Yearly overview</h2><p>Papers published in the last {window_days} days: <b>{len(rows)}</b></p>"
+
+def filter_by_tqcc(
+    rows: List[Tuple[str, str, str, str, str, str]],
+    tqcc_map: Dict[str, int],
+    tqcc_min: int,
+    include_unranked: bool,
+    whitelist: Set[str],
+) -> List[Tuple[str, str, str, str, str, str]]:
+    kept = []
+    whitelisted = 0
+    unranked = 0
+    below = 0
+
+    for r in rows:
+        (_pid, _source, _title, journal, _pubdate, _url) = r
+        j_norm = normalize_journal(journal)
+
+        if j_norm in whitelist:
+            kept.append(r)
+            whitelisted += 1
+            continue
+
+        score = tqcc_map.get(j_norm)
+
+        if score is None:
+            unranked += 1
+            if include_unranked:
+                kept.append(r)
+            continue
+
+        if score >= tqcc_min:
+            kept.append(r)
+        else:
+            below += 1
+
+    print(
+        f"[TQCC] cutoff >= {tqcc_min} | kept={len(kept)} | "
+        f"whitelisted={whitelisted} | below={below} | unranked={unranked} "
+        f"(include_unranked={include_unranked})"
+    )
+    return kept
+
+
+def build_html(
+    rows: List[Tuple[str, str, str, str, str, str]],
+    window_days: int,
+    tqcc_min: int,
+    include_unranked: bool,
+    whitelist_count: int,
+) -> str:
+    header = (
+        f"<h2>Yearly overview</h2>"
+        f"<p>Papers published in the last {window_days} days: <b>{len(rows)}</b></p>"
+        f"<p>Filter: <b>TQCC ≥ {tqcc_min}</b> "
+        f"({'including' if include_unranked else 'excluding'} unranked journals)"
+        f"{' + whitelist' if whitelist_count > 0 else ''}</p>"
+    )
+
     if not rows:
-        return header + "<p>No papers were published in this window.</p>"
+        return header + "<p>No papers matched the filter in this window.</p>"
 
     items = []
-    for (_pid, title, journal, pubdate, url) in rows:
+    for (_pid, source, title, journal, pubdate, url) in rows:
         title = (title or "(no title)").strip()
+        source = (source or "").strip()
         journal = (journal or "").strip()
         pubdate = (pubdate or "").strip()
         url = (url or "").strip()
 
-        meta = " — ".join([x for x in [journal, pubdate] if x])
+        meta_parts = [p for p in [source, journal, pubdate] if p]
+        meta = " — ".join(meta_parts)
         meta_html = f"<br><i>{meta}</i>" if meta else ""
         link_html = f"<br><a href='{url}'>Open</a>" if url else ""
 
@@ -111,19 +224,27 @@ def build_html(rows: List[Tuple[str, str, str, str, str]], window_days: int) -> 
 
 
 def main() -> None:
-    # Default to 365 days, but allow override (e.g., 30/90/365/730)
     window_days = get_window_days(default_days=365)
+    tqcc_min = get_int_env("TQCC_MIN", 15)
+    include_unranked = os.environ.get("INCLUDE_UNRANKED_JOURNALS", "0").strip() == "1"
+
     since = datetime.now(timezone.utc) - timedelta(days=window_days)
     since_date_iso = since.date().isoformat()
-    
+
+    tqcc_map = load_tqcc_map(TQCC_PATH)
+    whitelist = load_whitelist(WHITELIST_PATH)
+
     with sqlite3.connect(DB_PATH) as conn:
         init_db(conn)
         db_stats(conn)
         rows = fetch_rows(conn, since_date_iso)
 
+    if tqcc_map:
+        rows = filter_by_tqcc(rows, tqcc_map, tqcc_min, include_unranked, whitelist)
+
     today_utc = datetime.now(timezone.utc).date().isoformat()
     subject = f"Yearly overview — GBM invasion & integrins ({window_days}d window, as of {today_utc})"
-    html = build_html(rows, window_days)
+    html = build_html(rows, window_days, tqcc_min, include_unranked, whitelist_count=len(whitelist))
 
     send_email(subject, html)
 

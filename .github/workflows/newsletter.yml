@@ -62,6 +62,8 @@ jobs:
           NCBI_API_KEY: ${{ secrets.NCBI_API_KEY }}
           REPORT_TYPE: ${{ github.event.inputs.report_type }}
           DAYS_OVERRIDE: ${{ github.event.inputs.days }}
+          TQCC_MIN: "15"
+          INCLUDE_UNRANKED_JOURNALS: "0"
         run: |
           set -e
 
