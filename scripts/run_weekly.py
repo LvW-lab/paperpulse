@@ -8,19 +8,28 @@ from typing import List, Tuple
 DB_PATH = "paperpulse.db"
 
 
-def send_email(subject: str, html_body: str) -> None:
-    """
-    Send an HTML email using SMTP settings provided via environment variables.
+def init_db(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS papers (
+      id TEXT PRIMARY KEY,
+      source TEXT,
+      title TEXT,
+      journal TEXT,
+      published_date TEXT,
+      url TEXT,
+      created_at TEXT
+    )
+    """)
+    conn.commit()
 
-    Required env vars:
-      SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MAIL_FROM, MAIL_TO
-    """
+
+def send_email(subject: str, html_body: str) -> None:
     host = os.environ["SMTP_HOST"]
     port = int(os.environ.get("SMTP_PORT", "587"))
     user = os.environ["SMTP_USER"]
     password = os.environ["SMTP_PASS"]
     mail_from = os.environ["MAIL_FROM"]
-    mail_to = os.environ["MAIL_TO"]  # can be comma-separated list
+    mail_to = os.environ["MAIL_TO"]
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -37,58 +46,51 @@ def send_email(subject: str, html_body: str) -> None:
         smtp.send_message(msg)
 
 
-def get_window_days(default_days: int) -> int:
-    """
-    Allow overriding the window via DAYS_OVERRIDE env var (set from GitHub Actions workflow_dispatch input).
-    """
+def get_window_days(default_days: int, max_days: int = 1825) -> int:
     raw = os.environ.get("DAYS_OVERRIDE", "").strip()
     if raw.isdigit():
         days = int(raw)
-        if 1 <= days <= 3650:
+        if 1 <= days <= max_days:
             return days
     return default_days
 
 
-def fetch_rows(conn: sqlite3.Connection, since_iso: str) -> List[Tuple[str, str, str, str]]:
-    """
-    Fetch papers added to the DB since 'since_iso' (UTC ISO string).
-    """
+def fetch_rows(conn: sqlite3.Connection, since_iso: str) -> List[Tuple[str, str, str, str, str, str]]:
     return conn.execute(
         """
-        SELECT title, journal, published_date, url
+        SELECT id, source, title, journal, published_date, url
         FROM papers
         WHERE created_at >= ?
-        ORDER BY published_date DESC
+        ORDER BY created_at DESC
         """,
         (since_iso,),
     ).fetchall()
 
 
-def build_html(rows: List[Tuple[str, str, str, str]], window_days: int) -> str:
-    if not rows:
-        return (
-            f"<h2>Weekly overview</h2>"
-            f"<p>No papers were added to the database in the last {window_days} days.</p>"
-        )
-
-    items = []
-    for (t, j, d, u) in rows:
-        title = (t or "(no title)").strip()
-        journal = (j or "").strip()
-        pubdate = (d or "").strip()
-        url = (u or "").strip()
-
-        meta = " — ".join([x for x in [journal, pubdate] if x])
-        meta_html = f"<br><i>{meta}</i>" if meta else ""
-
-        link_html = f"<br><a href='{url}'>Open</a>" if url else ""
-        items.append(f"<li><b>{title}</b>{meta_html}{link_html}</li>")
-
-    return (
+def build_html(rows: List[Tuple[str, str, str, str, str, str]], window_days: int) -> str:
+    header = (
         f"<h2>Weekly overview</h2>"
         f"<p>Items added in the last {window_days} days: <b>{len(rows)}</b></p>"
-        f"<ol>{''.join(items)}</ol>"
     )
+    if not rows:
+        return header + "<p>No papers were added to the database in this window.</p>"
+
+    items = []
+    for (_pid, source, title, journal, pubdate, url) in rows:
+        title = (title or "(no title)").strip()
+        source = (source or "").strip()
+        journal = (journal or "").strip()
+        pubdate = (pubdate or "").strip()
+        url = (url or "").strip()
+
+        meta_parts = [p for p in [source, journal, pubdate] if p]
+        meta = " — ".join(meta_parts)
+        meta_html = f"<br><i>{meta}</i>" if meta else ""
+        link_html = f"<br><a href='{url}'>Open</a>" if url else ""
+
+        items.append(f"<li><b>{title}</b>{meta_html}{link_html}</li>")
+
+    return header + f"<ol>{''.join(items)}</ol>"
 
 
 def main() -> None:
@@ -96,9 +98,9 @@ def main() -> None:
     since = datetime.now(timezone.utc) - timedelta(days=window_days)
 
     with sqlite3.connect(DB_PATH) as conn:
+        init_db(conn)  # ✅ ensure table exists even if DB was empty/new
         rows = fetch_rows(conn, since.isoformat())
 
-    # Use UTC date in subject to be consistent across GitHub runners
     today_utc = datetime.now(timezone.utc).date().isoformat()
     subject = f"Weekly highlights — GBM invasion & integrins ({window_days}d window, as of {today_utc})"
     html = build_html(rows, window_days)

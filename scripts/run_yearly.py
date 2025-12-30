@@ -8,6 +8,19 @@ from typing import List, Tuple
 
 DB_PATH = "paperpulse.db"
 
+def init_db(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS papers (
+      id TEXT PRIMARY KEY,
+      source TEXT,
+      title TEXT,
+      journal TEXT,
+      published_date TEXT,
+      url TEXT,
+      created_at TEXT
+    )
+    """)
+    conn.commit()
 
 def send_email(subject: str, html_body: str) -> None:
     host = os.environ["SMTP_HOST"]
@@ -84,6 +97,7 @@ def main() -> None:
     since = datetime.now(timezone.utc) - timedelta(days=window_days)
 
     with sqlite3.connect(DB_PATH) as conn:
+        init_db(conn) 
         rows = fetch_rows(conn, since.isoformat())
 
     today_utc = datetime.now(timezone.utc).date().isoformat()
